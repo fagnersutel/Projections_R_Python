@@ -1,0 +1,90 @@
+<!---
+Projecting spatial data in Python and R
+-->
+<p>I use my blog as sort of a scholarly notebook. I often repeatedly do a task, and then can't find where I did it previously. One example is projecting crime data, so here are my notes on how to do that in python and R.</p>
+<p>Commonly I want to take public crime data that is in spherical lat/lon coordinates and project it to some local projection. Most of the time so I can do simply euclidean geometry (like buffers within X feet, or distance to the nearest crime generator in meters). Sometimes you need to do the opposite -- if I have the projected data and I want to plot the points on a webmap it is easier to work with the lat/lon coordinates. As a note, if you import your map data and then your points are not on the map (or in a way off location), there is some sort of problem with the projection.</p>
+<p>I used to do this in ArcMap (toolbox -&gt; Data Management -&gt; Projections), but doing it these programs are faster. Here are examples of going back and forth for some Dallas coordinates. <a href="">Here is the data and code</a> to replicate the post.</p>
+<h1 id="python">Python</h1>
+<p>In python there is a library <code>pyproj</code> that does all the work you need. It isn't part of the default python packages, so you will need to install it using pip or whatever. Basically you just need to define the to/from projections you want. Also it always returns the projected coordinates in meters, so if you want feet you need to do a conversions from meters to feet (or whatever unit you want). For below <code>p1</code> is the definition you want for lat/lon in webmaps (which is not a projection at all). To figure out your local projection though takes a little more work.</p>
+<p>To figure out your local projection I typically use this online tool, <a href="http://prj2epsg.org/search">prj2epsg</a>. You can upload a <code>prj</code> file, which is the locally defined projection file for shapefiles. (It is plain text as well, so you can just open in a text editor and paste into that site as well.) It will then tell you want EPSG code corresponds to your projection.</p>
+<p>Below illustrates putting it all together and going back and forth for an example area in Dallas. I tend to write the functions to take one record at a time for use in various workflows, but I am sure someone can write a vectorized version though that will take whole lists that is a better approach.</p>
+<pre><code>import pyproj
+
+#These functions convert to/from Dallas projection
+#In feet to lat/lon
+p1 = pyproj.Proj(proj=&#39;latlong&#39;,datum=&#39;WGS84&#39;)
+p2 = pyproj.Proj(init=&#39;epsg:2276&#39;) #show how to figure this out, http://spatialreference.org/ref/epsg/ and http://prj2epsg.org/search 
+met_to_feet = 3.280839895 #http://www.meters-to-feet.com/
+
+#This converts Lat/Lon to projected coordinates
+def DallConvProj(Lat,Lon):
+    #always returns in meters
+    if abs(Lat) &gt; 180 or abs(Lon) &gt; 180:
+        return (None,None)
+    else:
+        x,y = pyproj.transform(p1, p2, Lon, Lat)
+        return (x*met_to_feet, y*met_to_feet)
+
+#This does the opposite, coverts projected to lat/lon
+def DallConvSph(X,Y):
+    if abs(X) &lt; 2000000 or abs(Y) &lt; 6000000:
+        return (None,None)
+    else:
+        Lon,Lat = pyproj.transform(p2, p1, X/met_to_feet, Y/met_to_feet)
+        return (Lon, Lat)
+
+#check coordinates
+x1 = -96.828295; y1 = 32.832521
+print DallConvProj(Lat=y1,Lon=x1)
+
+x2 = 2481939.934525765; y2 = 6989916.200679892
+print DallConvSph(X=x2, Y=y2)</code></pre>
+<h1 id="r">R</h1>
+<p>In R I use the library <code>proj4</code> to do the projections for point data. R can read in the projection data from a file as well using the <code>rgdal</code> library.</p>
+<pre><code>library(proj4)
+library(rgdal)
+
+#read in projection from shapefile
+MyDir &lt;- &quot;C:\\Users\\axw161530\\Dropbox\\Documents\\BLOG\\Projections_R_Python&quot;
+setwd(MyDir)
+DalBound &lt;- readOGR(dsn=&quot;DallasBoundary_Proj.shp&quot;,layer=&quot;DallasBoundary_Proj&quot;)
+DalProj &lt;- proj4string(DalBound)    
+
+ProjData &lt;- data.frame(x=c(2481939.934525765),
+                       y=c(6989916.200679892),
+                       lat=c(32.832521),
+                       lon=c(-96.828295))
+       
+LatLon &lt;- proj4::project(as.matrix(ProjData[,c(&#39;x&#39;,&#39;y&#39;)]), proj=DalProj, inverse=TRUE)
+#check to see if true
+cbind(ProjData[,c(&#39;lon&#39;,&#39;lat&#39;)],as.data.frame(LatLon))
+
+XYFeet &lt;- proj4::project(as.matrix(ProjData[,c(&#39;lon&#39;,&#39;lat&#39;)]), proj=DalProj)
+cbind(ProjData[,c(&#39;x&#39;,&#39;y&#39;)],XYFeet)    
+
+plot(DalBound)
+points(ProjData$x,ProjData$y,col=&#39;red&#39;,pch=19,cex=2)</code></pre>
+<p>The last plot function shows that the XY point is within the Dallas basemap for the projected boundary. But if you want to project the boundary file as well, you can use the <code>spTransform</code> function. Here I have a simple example of tacking the projected boundary file and transforming to lat/lon, so can be superimposed on a leaflet map.</p>
+<p>Additionally I show a trick I sometimes use for maps by transforming the boundary polygon to a polyline, as it provides easier styling options sometimes.</p>
+<pre><code>#transform boundary to lat/lon
+DalLatLon &lt;- spTransform(DalBound,CRS(&quot;+init=epsg:4326&quot;) )
+plot(DalLatLon)
+points(ProjData$lon,ProjData$lat,col=&#39;red&#39;,pch=19,cex=2)
+
+#Leaflet useful for boundaries to be lines instead of areas
+DallLine &lt;- as(DalLatLon, &#39;SpatialLines&#39;)
+library(leaflet)
+
+BaseMapDallas &lt;- leaflet() %&gt;%
+  addProviderTiles(providers$OpenStreetMap, group = &quot;Open Street Map&quot;) %&gt;%
+  addProviderTiles(providers$CartoDB.Positron, group = &quot;CartoDB Lite&quot;) %&gt;%
+  addPolylines(data=DallLine, color=&#39;black&#39;, weight=4, group=&quot;Dallas Boundary Lines&quot;) %&gt;%
+  addPolygons(data=DalLatLon,color = &quot;#1717A1&quot;, weight = 1, smoothFactor = 0.5,
+              opacity = 1.0, fillOpacity = 0.5, group=&quot;Dallas Boundary Area&quot;) %&gt;%
+  addLayersControl(baseGroups = c(&quot;Open Street Map&quot;,&quot;CartoDB Lite&quot;),
+                   overlayGroups = c(&quot;Dallas Boundary Area&quot;,&quot;Dallas Boundary Lines&quot;),
+                   options = layersControlOptions(collapsed = FALSE)) %&gt;%
+                   hideGroup(&quot;Dallas Boundary Lines&quot;)   
+                      
+BaseMapDallas</code></pre>
+<p>I have too much stuff in the blog queue at the moment, but hopefully I get some time to write up my notes on using leaflet maps in R soon.</p>
